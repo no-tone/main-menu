@@ -146,52 +146,90 @@ const EAGER_ICON_COUNT = 8;
       </nav>
     </footer>
 
-    <script
-      define:vars={{
-        tailnetProbeUrl: import.meta.env.PUBLIC_TAILNET_PROBE_URL ?? "",
-      }}
-    >
-      const q = document.getElementById("q");
-      const tag = document.getElementById("tag");
-      const tiles = Array.from(document.querySelectorAll("a.tile[data-name]"));
+    <script>
+      type Status = "up" | "down" | "vpn" | "checking" | "unknown";
+      type ServerStatusValue = "up" | "down" | "unknown";
+      type Theme = "dark" | "light";
+
+      const STATUS_REFRESH_MS = 90_000;
+      const STATUS_TIMEOUT_MS = 2500;
+      const CLIENT_TIMEOUT_MS = 1200;
+      const TAILNET_IP_TIMEOUT_MS = 700;
+      const TAILNET_IP_CACHE_MS = 30_000;
+
+      const q = document.getElementById("q") as HTMLInputElement | null;
+      const tag = document.getElementById("tag") as HTMLSelectElement | null;
       const count = document.getElementById("count");
       const empty = document.getElementById("empty");
-      const themeToggle = document.querySelector(".topbar__toggle");
-      const themeIcon = document.querySelector(".topbar__toggleIcon");
+      const themeToggle =
+        document.querySelector<HTMLButtonElement>(".topbar__toggle");
+      const themeIcon =
+        document.querySelector<HTMLElement>(".topbar__toggleIcon");
+      const refreshBtn = document.getElementById("refresh") as
+        | HTMLElement
+        | null;
 
-      const readTheme = () =>
+      type Tile = {
+        el: HTMLAnchorElement;
+        href: string;
+        name: string;
+        tags: string;
+        isSelf: boolean;
+        statusEl: HTMLElement;
+        statusTextEl: HTMLElement;
+      };
+
+      const tiles: Tile[] = Array.from(
+        document.querySelectorAll<HTMLAnchorElement>("a.tile[data-name]"),
+      ).map((el) => {
+        const statusEl = el.querySelector<HTMLElement>(".status");
+        const statusTextEl = el.querySelector<HTMLElement>(".status .text");
+        if (!statusEl || !statusTextEl) {
+          throw new Error("tile missing .status or .status .text");
+        }
+        const tags = el.dataset.tags ?? "";
+        return {
+          el,
+          href: el.dataset.href ?? el.href,
+          name: el.dataset.name ?? "",
+          tags,
+          isSelf: tags.includes("Self-Hosted"),
+          statusEl,
+          statusTextEl,
+        };
+      });
+
+      const readTheme = (): Theme =>
         document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 
-      const applyTheme = (theme) => {
+      const applyTheme = (theme: Theme) => {
         document.documentElement.dataset.theme = theme;
         if (themeIcon) themeIcon.textContent = theme === "dark" ? "☾" : "☀︎";
       };
 
       applyTheme(readTheme());
       themeToggle?.addEventListener("click", () => {
-        const next = readTheme() === "dark" ? "light" : "dark";
+        const next: Theme = readTheme() === "dark" ? "light" : "dark";
         applyTheme(next);
         try {
           localStorage.setItem("theme", next);
         } catch {}
       });
 
-      function applyFilter() {
+      const applyFilter = () => {
         const query = (q?.value ?? "").trim().toLowerCase();
         const selected = (tag?.value ?? "").trim();
-
         let visible = 0;
-        for (const el of tiles) {
+        for (const tile of tiles) {
           const show =
-            (!query || (el.dataset.name ?? "").includes(query)) &&
-            (!selected || (el.dataset.tags ?? "").includes(selected));
-          el.hidden = !show;
+            (!query || tile.name.includes(query)) &&
+            (!selected || tile.tags.includes(selected));
+          tile.el.hidden = !show;
           if (show) visible++;
         }
-
         if (count) count.textContent = `${visible} / ${tiles.length}`;
         if (empty) empty.hidden = visible !== 0;
-      }
+      };
 
       q?.addEventListener("input", applyFilter);
       tag?.addEventListener("change", applyFilter);
@@ -204,108 +242,83 @@ const EAGER_ICON_COUNT = 8;
         }
       });
 
-      const STATUS_REFRESH_MS = 90_000;
-      const STATUS_TIMEOUT_MS = 2500;
-      const CLIENT_TIMEOUT_MS = 1200;
+      const STATUS_LABEL: Record<Status, string> = {
+        up: "up",
+        down: "down",
+        vpn: "vpn",
+        checking: "...",
+        unknown: "?",
+      };
 
-      const [PROBE_DESKTOP, PROBE_MOBILE] = (tailnetProbeUrl || "")
-        .split(",")
-        .map((s) => s.trim());
+      const setTileStatus = (tile: Tile, status: Status) => {
+        tile.statusEl.dataset.status = status;
+        tile.statusEl.setAttribute("aria-label", `Status: ${status}`);
+        tile.statusTextEl.textContent = STATUS_LABEL[status];
+      };
 
-      const isMobile =
-        window.matchMedia?.("(pointer: coarse)")?.matches ||
-        window.matchMedia?.("(max-width: 680px)")?.matches;
-
-      const TAILNET_PROBE_URL = isMobile
-        ? PROBE_MOBILE || PROBE_DESKTOP
-        : PROBE_DESKTOP || PROBE_MOBILE;
-
-      function setTileStatus(tile, status) {
-        const b = tile.querySelector(".status");
-        if (!b) return;
-        b.dataset.status = status;
-        b.setAttribute("aria-label", `Status: ${status}`);
-        const t = b.querySelector(".text");
-        if (t)
-          t.textContent =
-            status === "checking" ? "..." : status === "unknown" ? "?" : status;
-      }
-
-      function ping(tile, self) {
+      const pingUrl = async (href: string, timeoutMs: number): Promise<boolean> => {
+        let url: URL;
+        try {
+          url = new URL(href);
+        } catch {
+          return false;
+        }
         const c = new AbortController();
-        const t = setTimeout(
-          () => c.abort(),
-          self ? CLIENT_TIMEOUT_MS : STATUS_TIMEOUT_MS,
-        );
-        const u = new URL(tile.href);
-        const p = u.hostname === "pass.no-tone.com" ? "/favicon.ico" : "/";
-        return fetch(new URL(p, u), {
-          mode: "no-cors",
-          cache: "no-store",
-          signal: c.signal,
-        })
-          .then(
-            () => true,
-            () => false,
-          )
-          .finally(() => clearTimeout(t));
-      }
+        const t = setTimeout(() => c.abort(), timeoutMs);
+        try {
+          const path = url.hostname === "pass.no-tone.com" ? "/favicon.ico" : "/";
+          await fetch(new URL(path, url), {
+            mode: "no-cors",
+            cache: "no-store",
+            signal: c.signal,
+          });
+          return true;
+        } catch {
+          return false;
+        } finally {
+          clearTimeout(t);
+        }
+      };
 
-      function pingProbe(rawUrl) {
-        const url = (rawUrl || "").trim();
-        if (!url) return Promise.resolve(false);
-        const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url);
-        if (!hasScheme) return Promise.resolve(false);
-
-        const c = new AbortController();
-        const t = setTimeout(() => c.abort(), CLIENT_TIMEOUT_MS);
-        return fetch(url, {
-          mode: "no-cors",
-          cache: "no-store",
-          signal: c.signal,
-        })
-          .then(
-            () => true,
-            () => false,
-          )
-          .finally(() => clearTimeout(t));
-      }
-
-      function hasTailnetIP() {
-        return new Promise((resolve) => {
+      let tailnetPromise: Promise<boolean> | null = null;
+      let tailnetPromiseAt = 0;
+      const hasTailnetIP = (): Promise<boolean> => {
+        const now = Date.now();
+        if (tailnetPromise && now - tailnetPromiseAt < TAILNET_IP_CACHE_MS) {
+          return tailnetPromise;
+        }
+        tailnetPromiseAt = now;
+        tailnetPromise = new Promise<boolean>((resolve) => {
           try {
             const pc = new RTCPeerConnection({ iceServers: [] });
-            const done = (v) => {
+            const done = (v: boolean) => {
               try {
                 pc.onicecandidate = null;
                 pc.close();
               } catch {}
               resolve(v);
             };
-            const timer = setTimeout(() => done(false), 700);
+            const timer = setTimeout(() => done(false), TAILNET_IP_TIMEOUT_MS);
 
-            const isTailnet = (ip) => {
+            const isTailnet = (ip: string | undefined) => {
               if (!ip) return false;
               if (ip.startsWith("fd7a:115c:a1e0")) return true;
               const m = ip.match(/^(\d{1,3})\.(\d{1,3})\./);
               if (!m) return false;
-              const a = +m[1];
-              const b = +m[2];
-              return a === 100 && b >= 64 && b <= 127;
+              return +m[1] === 100 && +m[2] >= 64 && +m[2] <= 127;
             };
 
             pc.createDataChannel("x");
             pc.onicecandidate = (e) => {
-              const c = e.candidate?.candidate;
-              if (!c) return;
-              const ip = c.match(/(\d{1,3}(?:\.\d{1,3}){3})/)?.[1];
-              const ip6 = c.match(/([0-9a-fA-F:]{2,})/)?.[1];
-              if (isTailnet(ip) || isTailnet(ip6)) {
+              const cand = e.candidate?.candidate;
+              if (!cand) return;
+              const ip4 = cand.match(/(\d{1,3}(?:\.\d{1,3}){3})/)?.[1];
+              const ip6 = cand.match(/([0-9a-fA-F:]{2,})/)?.[1];
+              if (isTailnet(ip4) || isTailnet(ip6)) {
                 clearTimeout(timer);
                 done(true);
               }
             };
-
             pc.createOffer()
               .then((o) => pc.setLocalDescription(o))
               .catch(() => {
@@ -316,9 +329,15 @@ const EAGER_ICON_COUNT = 8;
             resolve(false);
           }
         });
-      }
+        return tailnetPromise;
+      };
 
-      async function serverStatuses() {
+      type ServerStatus = {
+        apps: Map<string, ServerStatusValue>;
+        tailnetDeviceOnline: boolean | null;
+      };
+
+      const serverStatuses = async (): Promise<ServerStatus> => {
         const c = new AbortController();
         const t = setTimeout(() => c.abort(), STATUS_TIMEOUT_MS);
         try {
@@ -326,61 +345,94 @@ const EAGER_ICON_COUNT = 8;
             cache: "no-store",
             signal: c.signal,
           });
-          if (!res.ok) return new Map();
-          const data = await res.json();
-          return new Map(
-            (data.apps || []).map((app) => [app.href, app.status]),
-          );
+          if (!res.ok) return { apps: new Map(), tailnetDeviceOnline: null };
+          const data = (await res.json()) as {
+            apps?: { href: string; status: ServerStatusValue }[];
+            tailnet?: { device?: { online?: boolean } };
+          };
+          return {
+            apps: new Map((data.apps ?? []).map((a) => [a.href, a.status])),
+            tailnetDeviceOnline:
+              typeof data.tailnet?.device?.online === "boolean"
+                ? data.tailnet.device.online
+                : null,
+          };
         } catch {
-          return new Map();
+          return { apps: new Map(), tailnetDeviceOnline: null };
         } finally {
           clearTimeout(t);
         }
-      }
+      };
 
-      async function checkStatuses() {
-        for (const tile of tiles) setTileStatus(tile, "checking");
-
+      const checkStatuses = async () => {
+        const visible = tiles.filter((tile) => !tile.el.hidden);
+        if (visible.length === 0) return;
+        for (const tile of visible) setTileStatus(tile, "checking");
         const [server, onTailnet] = await Promise.all([
           serverStatuses(),
-          hasTailnetIP().then((v) => v || pingProbe(TAILNET_PROBE_URL)),
+          hasTailnetIP(),
         ]);
-
         await Promise.all(
-          tiles.map(async (tile) => {
-            const self = (tile.dataset.tags ?? "").includes("Self-Hosted");
-            const serverStatus = server.get(tile.dataset.href);
+          visible.map(async (tile) => {
+            const serverStatus = server.apps.get(tile.href);
             if (serverStatus === "up") return setTileStatus(tile, "up");
-
-            const ok = await ping(tile, self);
-            if (!self) return setTileStatus(tile, ok ? "up" : "down");
+            if (tile.isSelf && server.tailnetDeviceOnline === false) {
+              return setTileStatus(tile, "down");
+            }
+            const ok = await pingUrl(
+              tile.href,
+              tile.isSelf ? CLIENT_TIMEOUT_MS : STATUS_TIMEOUT_MS,
+            );
+            if (!tile.isSelf) return setTileStatus(tile, ok ? "up" : "down");
             if (ok) return setTileStatus(tile, "up");
-
             setTileStatus(tile, onTailnet ? "down" : "vpn");
           }),
         );
-      }
+      };
 
       let statusRunning = false;
-      const runStatusCheck = () =>
-        !statusRunning &&
-        ((statusRunning = true),
-        checkStatuses().finally(() => (statusRunning = false)));
+      const runStatusCheck = () => {
+        if (statusRunning) return;
+        statusRunning = true;
+        checkStatuses().finally(() => {
+          statusRunning = false;
+        });
+      };
 
-      const refreshBtn = document.getElementById("refresh");
-      refreshBtn?.addEventListener("click", () => {
-        refreshBtn.classList.remove("spinning");
-        void refreshBtn.offsetWidth;
-        refreshBtn.classList.add("spinning");
-        runStatusCheck();
+      if (refreshBtn) {
+        refreshBtn.addEventListener("click", () => {
+          refreshBtn.classList.remove("spinning");
+          void refreshBtn.offsetWidth;
+          refreshBtn.classList.add("spinning");
+          runStatusCheck();
+        });
+        refreshBtn.addEventListener("animationend", () =>
+          refreshBtn.classList.remove("spinning"),
+        );
+      }
+
+      let intervalId: ReturnType<typeof setInterval> | null = null;
+      const startInterval = () => {
+        if (intervalId !== null) return;
+        intervalId = setInterval(runStatusCheck, STATUS_REFRESH_MS);
+      };
+      const stopInterval = () => {
+        if (intervalId === null) return;
+        clearInterval(intervalId);
+        intervalId = null;
+      };
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          stopInterval();
+        } else if (intervalId === null) {
+          runStatusCheck();
+          startInterval();
+        }
       });
 
-      refreshBtn?.addEventListener("animationend", () =>
-        refreshBtn.classList.remove("spinning"),
-      );
-
       runStatusCheck();
-      window.setInterval(runStatusCheck, STATUS_REFRESH_MS);
+      startInterval();
     </script>
   </body>
 </html>

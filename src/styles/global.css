@@ -334,6 +334,8 @@ input::placeholder {
 }
 
 .tile {
+  position: relative;
+  z-index: 0;
   min-width: 0;
   color: var(--fg);
   text-decoration: none;
@@ -351,6 +353,7 @@ input::placeholder {
 
 .tile:hover,
 .tile:focus-visible {
+  z-index: 1;
   border-color: var(--selection-border);
   transform: translateY(-1px);
 }
