@@ -31,7 +31,12 @@ npm run dev
 
 ## Tailnet Status (vpn / up / down)
 
-The UI can only reliably distinguish `vpn` vs `down` if it can reach a tailnet-only HTTP(S) health URL.
+The UI checks status in two passes:
+
+- `/api/status.json` runs in Cloudflare and probes each app URL server-side.
+- The browser still checks whether the client can reach a tailnet-only health URL. That is the only part that can distinguish `vpn` from `down`, because Cloudflare cannot see whether the visitor has Tailscale enabled.
+
+Tailscale app connectors route tailnet client traffic to configured domains. They do not make a public Cloudflare Worker part of your tailnet. For private origins, use Cloudflare Tunnel/Access or keep the client-side tailnet probe below.
 
 On a machine that has Tailscale running, create one:
 

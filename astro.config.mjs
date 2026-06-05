@@ -5,7 +5,8 @@ import cloudflare from "@astrojs/cloudflare";
 
 // https://astro.build/config
 export default defineConfig({
-  site: "https://example.com",
+  site: "https://apps.no-tone.com",
+  output: "server",
   image: {
     remotePatterns: [
       {
@@ -18,8 +19,5 @@ export default defineConfig({
   integrations: [],
   adapter: cloudflare({
     imageService: "compile",
-    platformProxy: {
-      enabled: true,
-    },
   }),
 });
